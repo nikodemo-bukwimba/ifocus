@@ -1,0 +1,56 @@
+name: ifocus
+description: "Issubi Focus."
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI icons
+  cupertino_icons: ^1.0.8
+
+  # Local storage
+  shared_preferences: ^2.2.2
+
+  # Date formatting
+  intl: ^0.20.2
+
+  # Local notifications
+  flutter_local_notifications: ^17.1.0
+
+  # Charts for stats & progress
+  fl_chart: ^0.69.0
+
+  # For saving files (PDF, exports, storage)
+  path_provider: ^2.1.2
+
+  # PDF generation
+  pdf: ^3.10.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # Lints (latest stable)
+  flutter_lints: ^6.0.0
+
+  # Icon generator
+  flutter_launcher_icons: ^0.13.1
+
+flutter_icons:
+  android: true
+  ios: true
+  web: true
+  windows: true
+  image_path: "assets/icon/issubi.png"
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon/issubi.png
+    - assets/icon/issubi.ico
