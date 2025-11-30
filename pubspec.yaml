@@ -28,6 +28,12 @@ dependencies:
 
   # For saving files (PDF, exports, storage)
   path_provider: ^2.1.2
+  path: ^1.8.3
+
+  # Google Drive Sync API
+  googleapis: ^11.4.0
+  googleapis_auth: ^1.4.1
+  url_launcher: ^6.2.2
 
   # PDF generation
   pdf: ^3.10.7

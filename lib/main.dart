@@ -6,9 +6,11 @@ import 'package:intl/intl.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'dart:async';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -16,7 +18,6 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize notifications
   const initializationSettingsAndroid = AndroidInitializationSettings(
     '@mipmap/ic_launcher',
   );
@@ -33,11 +34,11 @@ void main() async {
 
   await flutterLocalNotificationsPlugin.initialize(initializationSettings);
 
-  runApp(const FounderTrackerApp());
+  runApp(const IfocusApp());
 }
 
-class FounderTrackerApp extends StatelessWidget {
-  const FounderTrackerApp({Key? key}) : super(key: key);
+class IfocusApp extends StatelessWidget {
+  const IfocusApp({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -135,26 +136,48 @@ class TrackerHomePage extends StatefulWidget {
 }
 
 class _TrackerHomePageState extends State<TrackerHomePage> {
+  // Core tracking variables
   int currentDay = 1;
   int currentPhase = 1;
   DateTime selectedDate = DateTime.now();
   List<Task> todayTasks = [];
   List<Map<String, dynamic>> dailyLogs = [];
+
+  // Focus mode variables
   bool isFocusMode = false;
+  Process? _firewallProcess;
+  Timer? _processMonitoringTimer;
+
+  // Week planning
   WeeklyPlan? currentWeekPlan;
   Map<String, WeeklyPlan> weeklyPlans = {};
-  Timer? notificationTimer;
+
+  // Pomodoro timer
   Timer? pomodoroTimer;
   int pomodoroMinutesLeft = 25;
   bool isPomodoroRunning = false;
   Task? currentPomodoroTask;
 
+  // Notifications
+  Timer? notificationTimer;
+
+  // File-based storage (NEW)
+  File? _dataFile;
+  Directory? _appDataDir;
+
+  // Google Drive sync (NEW)
+  bool _isSyncEnabled = false;
+  DateTime? _lastSyncTime;
+  Timer? _autoSyncTimer;
+
   @override
   void initState() {
     super.initState();
-    _loadData();
-    _startNotificationChecker();
-    _checkHostsFilePermissions();
+    _initializeDataFile().then((_) {
+      _loadData();
+      _startNotificationChecker();
+      _checkHostsFilePermissions();
+    });
   }
 
   @override
@@ -162,42 +185,711 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     notificationTimer?.cancel();
     pomodoroTimer?.cancel();
     _processMonitoringTimer?.cancel();
+    _autoSyncTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> _loadData() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      currentDay = prefs.getInt('currentDay') ?? 1;
-      currentPhase = _getPhaseFromDay(currentDay);
+  // NEW: Google Drive sync methods
+  Future<void> _setupGoogleDriveSync() async {
+    try {
+      // Show setup dialog
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('☁️ Google Drive Sync'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Enable automatic backup to Google Drive?',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              const Text('Benefits:'),
+              const SizedBox(height: 8),
+              Text(
+                '✅ Automatic daily backups',
+                style: TextStyle(color: Colors.grey[400]),
+              ),
+              Text(
+                '✅ Access from any device',
+                style: TextStyle(color: Colors.grey[400]),
+              ),
+              Text(
+                '✅ Never lose your progress',
+                style: TextStyle(color: Colors.grey[400]),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  '⚠️ You will be redirected to Google to authorize access.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await _enableGoogleDriveSync();
+              },
+              child: const Text('Enable Sync'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      print('❌ Sync setup failed: $e');
+    }
+  }
 
-      final dateStr = prefs.getString('selectedDate');
-      if (dateStr != null) {
-        selectedDate = DateTime.parse(dateStr);
+  // Simple file-based Google Drive sync (uses Google Drive folder sync)
+  Future<void> _enableGoogleDriveSync() async {
+    try {
+      // Check if Google Drive desktop app is installed
+      final googleDrivePath = path.join(
+        Platform.environment['USERPROFILE'] ?? '',
+        'Google Drive',
+      );
+
+      final googleDriveDir = Directory(googleDrivePath);
+
+      if (await googleDriveDir.exists()) {
+        // Use Google Drive folder
+        await _setupGoogleDriveFolder();
+      } else {
+        // Fallback: Show manual setup instructions
+        _showManualGoogleDriveSetup();
+      }
+    } catch (e) {
+      print('❌ Google Drive sync failed: $e');
+    }
+  }
+
+  Future<void> _setupGoogleDriveFolder() async {
+    try {
+      // Create iFocus folder in Google Drive
+      final googleDrivePath = path.join(
+        Platform.environment['USERPROFILE'] ?? '',
+        'Google Drive',
+        'iFocus_Backups',
+      );
+
+      final syncDir = Directory(googleDrivePath);
+      if (!await syncDir.exists()) {
+        await syncDir.create(recursive: true);
       }
 
-      final tasksJson = prefs.getString('todayTasks');
-      if (tasksJson != null) {
-        final tasksList = json.decode(tasksJson) as List;
-        todayTasks = tasksList.map((t) => Task.fromJson(t)).toList();
-      }
+      setState(() {
+        _isSyncEnabled = true;
+      });
 
-      final logsJson = prefs.getString('dailyLogs');
-      if (logsJson != null) {
-        dailyLogs = List<Map<String, dynamic>>.from(json.decode(logsJson));
-      }
+      // Start auto-sync timer (every 6 hours)
+      _autoSyncTimer?.cancel();
+      _autoSyncTimer = Timer.periodic(const Duration(hours: 6), (timer) {
+        _syncToGoogleDrive();
+      });
 
-      final weeklyPlansJson = prefs.getString('weeklyPlans');
-      if (weeklyPlansJson != null) {
-        final plansMap = json.decode(weeklyPlansJson) as Map;
-        weeklyPlans = plansMap.map(
-          (k, v) => MapEntry(k, WeeklyPlan.fromJson(v)),
+      // Perform initial sync
+      await _syncToGoogleDrive();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('✅ Google Drive sync enabled!'),
+            backgroundColor: Colors.green,
+            action: SnackBarAction(
+              label: 'Open Folder',
+              textColor: Colors.white,
+              onPressed: () {
+                Process.run('explorer', [googleDrivePath]);
+              },
+            ),
+          ),
         );
       }
+    } catch (e) {
+      print('❌ Setup failed: $e');
+    }
+  }
 
-      _loadWeekPlan();
-      _initializeDefaultTasks();
-    });
+  Future<void> _syncToGoogleDrive() async {
+    try {
+      if (!_isSyncEnabled || _dataFile == null) return;
+
+      final googleDrivePath = path.join(
+        Platform.environment['USERPROFILE'] ?? '',
+        'Google Drive',
+        'iFocus_Backups',
+      );
+
+      final syncDir = Directory(googleDrivePath);
+      if (!await syncDir.exists()) {
+        await syncDir.create(recursive: true);
+      }
+
+      // Copy current data file
+      final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final syncFile = File(
+        path.join(syncDir.path, 'ifocus_sync_$timestamp.json'),
+      );
+
+      await _dataFile!.copy(syncFile.path);
+
+      // Keep only last 10 synced backups
+      final syncedFiles =
+          syncDir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.contains('ifocus_sync_'))
+              .toList()
+            ..sort((a, b) => b.path.compareTo(a.path));
+
+      if (syncedFiles.length > 10) {
+        for (var i = 10; i < syncedFiles.length; i++) {
+          await syncedFiles[i].delete();
+        }
+      }
+
+      setState(() {
+        _lastSyncTime = DateTime.now();
+      });
+
+      print(
+        '☁️ Synced to Google Drive at ${DateFormat('HH:mm').format(_lastSyncTime!)}',
+      );
+    } catch (e) {
+      print('❌ Sync failed: $e');
+    }
+  }
+
+  void _showManualGoogleDriveSetup() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('📋 Manual Google Drive Setup'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Google Drive desktop app not detected.',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              const Text('Option 1: Install Google Drive Desktop'),
+              const SizedBox(height: 8),
+              Text(
+                '1. Download from: drive.google.com/drive/download\n'
+                '2. Install and sign in\n'
+                '3. Come back and enable sync again',
+                style: TextStyle(color: Colors.grey[400], fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              const Text('Option 2: Manual Backup'),
+              const SizedBox(height: 8),
+              Text(
+                '1. Click "Data Location" button\n'
+                '2. Copy your data folder to Google Drive manually\n'
+                '3. Do this weekly to stay safe',
+                style: TextStyle(color: Colors.grey[400], fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () async {
+              final uri = Uri.parse('https://www.google.com/drive/download/');
+              if (await canLaunchUrl(uri)) {
+                await launchUrl(uri);
+              }
+            },
+            icon: const Icon(Icons.download),
+            label: const Text('Download Drive'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // NEW: Restore from Google Drive
+  Future<void> _restoreFromGoogleDrive() async {
+    try {
+      final googleDrivePath = path.join(
+        Platform.environment['USERPROFILE'] ?? '',
+        'Google Drive',
+        'iFocus_Backups',
+      );
+
+      final syncDir = Directory(googleDrivePath);
+
+      if (!await syncDir.exists()) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('⚠️ No Google Drive backups found'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+        return;
+      }
+
+      final syncedFiles =
+          syncDir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.contains('ifocus_sync_'))
+              .toList()
+            ..sort((a, b) => b.path.compareTo(a.path));
+
+      if (syncedFiles.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('⚠️ No sync files found in Google Drive'),
+            ),
+          );
+        }
+        return;
+      }
+
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('☁️ Restore from Google Drive'),
+          content: SizedBox(
+            width: 450,
+            height: 400,
+            child: ListView.builder(
+              itemCount: syncedFiles.length,
+              itemBuilder: (context, index) {
+                final file = syncedFiles[index];
+                final filename = path.basename(file.path);
+                final stat = file.statSync();
+                final modified = DateFormat(
+                  'MMM dd, yyyy HH:mm',
+                ).format(stat.modified);
+
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  child: ListTile(
+                    leading: const Icon(
+                      Icons.cloud_download,
+                      color: Colors.blue,
+                    ),
+                    title: Text(
+                      filename,
+                      style: const TextStyle(fontSize: 13),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      'Synced: $modified\nSize: ${(stat.size / 1024).toStringAsFixed(2)} KB',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    trailing: const Icon(Icons.restore),
+                    onTap: () async {
+                      await _performRestore(file);
+                      Navigator.pop(context);
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      print('❌ Google Drive restore failed: $e');
+    }
+  }
+
+  // NEW: Initialize persistent data file
+  Future<void> _initializeDataFile() async {
+    try {
+      // Use Documents folder (survives uninstall/reinstall)
+      final documentsDir = await getApplicationDocumentsDirectory();
+      _appDataDir = Directory(path.join(documentsDir.path, 'iFocus'));
+
+      // Create iFocus folder if doesn't exist
+      if (!await _appDataDir!.exists()) {
+        await _appDataDir!.create(recursive: true);
+        print('📁 Created iFocus data folder: ${_appDataDir!.path}');
+      }
+
+      // Data file location
+      _dataFile = File(path.join(_appDataDir!.path, 'user_data.json'));
+
+      if (!await _dataFile!.exists()) {
+        // Create initial data file
+        await _dataFile!.writeAsString(
+          json.encode({
+            'version': 1,
+            'currentDay': 1,
+            'currentPhase': 1,
+            'selectedDate': DateTime.now().toIso8601String(),
+            'dailyLogs': [],
+            'todayTasks': [],
+            'weeklyPlans': {},
+            'createdAt': DateTime.now().toIso8601String(),
+          }),
+        );
+        print('✅ Created new data file at: ${_dataFile!.path}');
+      } else {
+        print('✅ Found existing data file: ${_dataFile!.path}');
+      }
+    } catch (e) {
+      print('❌ Error initializing data file: $e');
+    }
+  }
+
+  //Load from JSON file instead of SharedPreferences
+  Future<void> _loadData() async {
+    if (_dataFile == null) {
+      print('❌ Data file not initialized');
+      return;
+    }
+
+    try {
+      final content = await _dataFile!.readAsString();
+      final data = json.decode(content) as Map<String, dynamic>;
+
+      setState(() {
+        currentDay = data['currentDay'] ?? 1;
+        currentPhase = _getPhaseFromDay(currentDay);
+
+        final dateStr = data['selectedDate'];
+        if (dateStr != null) {
+          selectedDate = DateTime.parse(dateStr);
+        }
+
+        final tasksData = data['todayTasks'] as List?;
+        if (tasksData != null) {
+          todayTasks = tasksData.map((t) => Task.fromJson(t)).toList();
+        }
+
+        final logsData = data['dailyLogs'] as List?;
+        if (logsData != null) {
+          dailyLogs = List<Map<String, dynamic>>.from(logsData);
+        }
+
+        final plansData = data['weeklyPlans'] as Map?;
+        if (plansData != null) {
+          weeklyPlans = plansData.map(
+            (k, v) => MapEntry(k.toString(), WeeklyPlan.fromJson(v)),
+          );
+        }
+
+        _loadWeekPlan();
+        _initializeDefaultTasks();
+      });
+
+      print('✅ Data loaded successfully - Day $currentDay');
+    } catch (e) {
+      print('❌ Error loading data: $e');
+    }
+  }
+
+  // UPDATED: Save to JSON file instead of SharedPreferences
+  Future<void> _saveData() async {
+    if (_dataFile == null) {
+      print('❌ Data file not initialized');
+      return;
+    }
+
+    try {
+      final data = {
+        'version': 1,
+        'currentDay': currentDay,
+        'currentPhase': currentPhase,
+        'selectedDate': selectedDate.toIso8601String(),
+        'todayTasks': todayTasks.map((t) => t.toJson()).toList(),
+        'dailyLogs': dailyLogs,
+        'weeklyPlans': weeklyPlans.map((k, v) => MapEntry(k, v.toJson())),
+        'lastSaved': DateTime.now().toIso8601String(),
+      };
+
+      await _dataFile!.writeAsString(json.encode(data));
+      print('💾 Data saved - Day $currentDay');
+    } catch (e) {
+      print('❌ Error saving data: $e');
+    }
+  }
+
+  // NEW: Show data location
+  Future<void> _showDataLocation() async {
+    if (_dataFile == null) return;
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('📁 Data Location'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Your tracking data is stored at:',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            SelectableText(
+              _dataFile!.parent.path,
+              style: const TextStyle(
+                fontFamily: 'Courier',
+                fontSize: 12,
+                color: Colors.blue,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              '✅ This data survives app updates and reinstalls',
+              style: TextStyle(color: Colors.green),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'File size: ${(_dataFile!.lengthSync() / 1024).toStringAsFixed(2)} KB',
+              style: TextStyle(color: Colors.grey[400], fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Process.run('explorer', [_dataFile!.parent.path]);
+            },
+            child: const Text('Open Folder'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // NEW: Create manual backup
+  Future<void> _createManualBackup() async {
+    try {
+      if (_dataFile == null) return;
+
+      final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final backupFile = File(
+        path.join(_dataFile!.parent.path, 'backup_$timestamp.json'),
+      );
+
+      await _dataFile!.copy(backupFile.path);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Backup created: backup_$timestamp.json'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+            action: SnackBarAction(
+              label: 'Open Folder',
+              textColor: Colors.white,
+              onPressed: () {
+                Process.run('explorer', [_dataFile!.parent.path]);
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Backup failed: $e');
+    }
+  }
+
+  // UPDATED: Better backup detection
+  Future<void> _restoreFromBackup() async {
+    try {
+      if (_appDataDir == null) return;
+
+      // Find all JSON files (includes renamed backups)
+      final allJsonFiles =
+          _appDataDir!
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.toLowerCase().endsWith('.json'))
+              .toList()
+            ..sort(
+              (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+            ); // Sort by date modified
+
+      // Exclude the main data file
+      final backupFiles = allJsonFiles
+          .where((f) => !f.path.endsWith('user_data.json'))
+          .toList();
+
+      if (backupFiles.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('No backup files found'),
+              action: SnackBarAction(
+                label: 'Open Folder',
+                onPressed: () {
+                  Process.run('explorer', [_appDataDir!.path]);
+                },
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('📂 Restore from Backup'),
+          content: SizedBox(
+            width: 450,
+            height: 400,
+            child: Column(
+              children: [
+                Text(
+                  'Found ${backupFiles.length} backup file(s)',
+                  style: TextStyle(color: Colors.grey[400], fontSize: 14),
+                ),
+                const SizedBox(height: 16),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: backupFiles.length,
+                    itemBuilder: (context, index) {
+                      final file = backupFiles[index];
+                      final filename = path.basename(file.path);
+                      final stat = file.statSync();
+                      final modified = DateFormat(
+                        'MMM dd, yyyy HH:mm',
+                      ).format(stat.modified);
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          leading: const Icon(Icons.backup, color: Colors.blue),
+                          title: Text(
+                            filename,
+                            style: const TextStyle(fontSize: 13),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            'Modified: $modified\nSize: ${(stat.size / 1024).toStringAsFixed(2)} KB',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          trailing: const Icon(Icons.restore),
+                          onTap: () async {
+                            await _performRestore(file);
+                            Navigator.pop(context);
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () {
+                Process.run('explorer', [_appDataDir!.path]);
+              },
+              icon: const Icon(Icons.folder_open),
+              label: const Text('Open Folder'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      print('❌ Restore failed: $e');
+    }
+  }
+
+  // NEW: Perform actual restore
+  Future<void> _performRestore(File backupFile) async {
+    try {
+      final content = await backupFile.readAsString();
+      final data = json.decode(content);
+
+      setState(() {
+        currentDay = data['currentDay'] ?? 1;
+        currentPhase = data['currentPhase'] ?? 1;
+
+        final dateStr = data['selectedDate'];
+        if (dateStr != null) {
+          selectedDate = DateTime.parse(dateStr);
+        }
+
+        final logsData = data['dailyLogs'] as List?;
+        if (logsData != null) {
+          dailyLogs = List<Map<String, dynamic>>.from(logsData);
+        }
+
+        final tasksData = data['todayTasks'] as List?;
+        if (tasksData != null) {
+          todayTasks = tasksData.map((t) => Task.fromJson(t)).toList();
+        }
+
+        final plansData = data['weeklyPlans'] as Map?;
+        if (plansData != null) {
+          weeklyPlans = plansData.map(
+            (k, v) => MapEntry(k.toString(), WeeklyPlan.fromJson(v)),
+          );
+        }
+      });
+
+      await _saveData();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Restored from: ${path.basename(backupFile.path)}'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Restore failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to restore: Invalid backup file'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   void _loadWeekPlan() {
@@ -208,21 +900,6 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
 
   DateTime _getWeekStart(DateTime date) {
     return date.subtract(Duration(days: date.weekday - 1));
-  }
-
-  Future<void> _saveData() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('currentDay', currentDay);
-    await prefs.setString('selectedDate', selectedDate.toIso8601String());
-    await prefs.setString(
-      'todayTasks',
-      json.encode(todayTasks.map((t) => t.toJson()).toList()),
-    );
-    await prefs.setString('dailyLogs', json.encode(dailyLogs));
-    await prefs.setString(
-      'weeklyPlans',
-      json.encode(weeklyPlans.map((k, v) => MapEntry(k, v.toJson()))),
-    );
   }
 
   void _startNotificationChecker() {
@@ -269,10 +946,6 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
       details,
     );
   }
-
-  // Add these variables to your state class
-  Process? _firewallProcess;
-  Timer? _processMonitoringTimer;
 
   // Main toggle function that user calls
   Future<void> _toggleFocusMode() async {
@@ -1370,8 +2043,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                     ),
                   ),
                 ),
-
-                // Bottom buttons
+                // Bottom buttons in sidebar
                 Padding(
                   padding: const EdgeInsets.all(20),
                   child: Column(
@@ -1403,6 +2075,58 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                         ),
                       ),
                       const SizedBox(height: 10),
+
+                      // NEW: Google Drive Sync
+                      ElevatedButton.icon(
+                        onPressed: _isSyncEnabled
+                            ? _syncToGoogleDrive
+                            : _setupGoogleDriveSync,
+                        icon: Icon(
+                          _isSyncEnabled ? Icons.cloud_done : Icons.cloud_off,
+                          size: 20,
+                        ),
+                        label: Text(
+                          _isSyncEnabled ? 'Sync Now' : 'Enable Sync',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 45),
+                          backgroundColor: _isSyncEnabled
+                              ? Colors.blue[700]
+                              : Colors.grey[700],
+                        ),
+                      ),
+                      if (_lastSyncTime != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            'Last sync: ${DateFormat('HH:mm').format(_lastSyncTime!)}',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey[500],
+                            ),
+                          ),
+                        ),
+
+                      const SizedBox(height: 10),
+                      ElevatedButton.icon(
+                        onPressed: _createManualBackup,
+                        icon: const Icon(Icons.backup, size: 20),
+                        label: const Text('Backup Now'),
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 45),
+                          backgroundColor: Colors.green[700],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: _showDataLocation,
+                        icon: const Icon(Icons.folder_open, size: 20),
+                        label: const Text('Data Location'),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 45),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
                       OutlinedButton.icon(
                         onPressed: _undoLastDay,
                         icon: const Icon(Icons.undo, size: 20),
@@ -1411,13 +2135,54 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                           minimumSize: const Size(double.infinity, 45),
                         ),
                       ),
+                      const SizedBox(height: 10),
+
+                      // NEW: Restore with dropdown
+                      PopupMenuButton<String>(
+                        child: OutlinedButton.icon(
+                          onPressed: null,
+                          icon: const Icon(Icons.restore, size: 20),
+                          label: const Text('Restore'),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 45),
+                          ),
+                        ),
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                            value: 'local',
+                            child: Row(
+                              children: [
+                                Icon(Icons.folder),
+                                SizedBox(width: 8),
+                                Text('From Local Backup'),
+                              ],
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: 'drive',
+                            child: Row(
+                              children: [
+                                Icon(Icons.cloud),
+                                SizedBox(width: 8),
+                                Text('From Google Drive'),
+                              ],
+                            ),
+                          ),
+                        ],
+                        onSelected: (value) {
+                          if (value == 'local') {
+                            _restoreFromBackup();
+                          } else if (value == 'drive') {
+                            _restoreFromGoogleDrive();
+                          }
+                        },
+                      ),
                     ],
                   ),
                 ),
               ],
             ),
           ),
-
           // Main content - Fixed overflow
           Expanded(
             child: Padding(
