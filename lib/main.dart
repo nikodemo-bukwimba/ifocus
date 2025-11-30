@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:io';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'dart:async';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
@@ -145,7 +143,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
 
   // Focus mode variables
   bool isFocusMode = false;
-  Process? _firewallProcess;
+  // Process? _firewallProcess;
   Timer? _processMonitoringTimer;
 
   // Week planning
