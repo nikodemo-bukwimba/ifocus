@@ -5,10 +5,11 @@ import 'package:intl/intl.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'dart:async';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -163,19 +164,64 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
   File? _dataFile;
   Directory? _appDataDir;
 
+  String _clientId = '';
+  String _clientSecret = '';
+
   // Google Drive sync (NEW)
   bool _isSyncEnabled = false;
   DateTime? _lastSyncTime;
   Timer? _autoSyncTimer;
+  String? _googleDriveFolderId;
+  bool _isGoogleDriveConnected = false;
+  String? _googleAccessToken;
+
+  String get _tokenFilePath {
+    return path.join(
+      Platform.environment['USERPROFILE'] ?? '',
+      'AppData/Local/iFocus/.google_token',
+    );
+  }
 
   @override
   void initState() {
     super.initState();
+    _loadConfigCredentials();
     _initializeDataFile().then((_) {
       _loadData();
       _startNotificationChecker();
       _checkHostsFilePermissions();
     });
+    _loadSavedToken();
+  }
+
+  Future<void> _loadConfigCredentials() async {
+    try {
+      final configFile = File(
+        path.join(
+          Platform.environment['USERPROFILE'] ?? '',
+          'AppData/Local/iFocus/config.json',
+        ),
+      );
+
+      if (configFile.existsSync()) {
+        final json = jsonDecode(configFile.readAsStringSync());
+        _clientId = json['google_client_id'] ?? '';
+        _clientSecret = json['google_client_secret'] ?? '';
+        print('✅ Loaded credentials from config.json');
+      } else {
+        // Create default config
+        await configFile.parent.create(recursive: true);
+        final defaultConfig = {
+          'google_client_id': 'YOUR_CLIENT_ID_HERE',
+          'google_client_secret': 'YOUR_CLIENT_SECRET_HERE',
+        };
+        configFile.writeAsStringSync(jsonEncode(defaultConfig));
+        print('⚠️ Config file created at: ${configFile.path}');
+        print('⚠️ Please edit it with your Google credentials');
+      }
+    } catch (e) {
+      print('❌ Error loading config: $e');
+    }
   }
 
   @override
@@ -187,27 +233,85 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     super.dispose();
   }
 
+  Future<void> _loadSavedToken() async {
+    try {
+      final tokenFile = File(_tokenFilePath);
+      if (tokenFile.existsSync()) {
+        final token = tokenFile.readAsStringSync().trim();
+        if (token.isNotEmpty) {
+          _googleAccessToken = token;
+          _isGoogleDriveConnected = true;
+          print('✅ Loaded saved Google Drive token');
+
+          // Verify token is still valid and get folder ID
+          await _createOrGetGoogleDriveFolder({
+            'Authorization': 'Bearer $_googleAccessToken',
+          });
+        }
+      }
+    } catch (e) {
+      print('⚠️ Could not load saved token: $e');
+    }
+  }
+
+  Future<void> _saveToken(String token) async {
+    try {
+      final tokenFile = File(_tokenFilePath);
+      await tokenFile.parent.create(recursive: true);
+      tokenFile.writeAsStringSync(token);
+      print('✅ Token saved');
+    } catch (e) {
+      print('❌ Could not save token: $e');
+    }
+  }
+
   // NEW: Google Drive sync methods
   Future<void> _setupGoogleDriveSync() async {
     try {
+      // If already connected, show disconnect option
+      if (_isGoogleDriveConnected && _googleAccessToken != null) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('☁️ Google Drive'),
+            content: const Text('Google Drive backup is already enabled'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _disconnectGoogleDrive();
+                },
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                child: const Text('Disconnect'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
       // Show setup dialog
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('☁️ Google Drive Sync'),
+          title: const Text('☁️ Google Drive Remote Backup'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Enable automatic backup to Google Drive?',
+                'Enable cloud backup to Google Drive?',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 16),
               const Text('Benefits:'),
               const SizedBox(height: 8),
               Text(
-                '✅ Automatic daily backups',
+                '✅ Remote cloud backup',
                 style: TextStyle(color: Colors.grey[400]),
               ),
               Text(
@@ -215,7 +319,11 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                 style: TextStyle(color: Colors.grey[400]),
               ),
               Text(
-                '✅ Never lose your progress',
+                '✅ Automatic hourly sync',
+                style: TextStyle(color: Colors.grey[400]),
+              ),
+              Text(
+                '✅ Plus local backup (already enabled)',
                 style: TextStyle(color: Colors.grey[400]),
               ),
               const SizedBox(height: 16),
@@ -226,7 +334,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: const Text(
-                  '⚠️ You will be redirected to Google to authorize access.',
+                  '🔐 Requires Google account login (one-time setup)',
                   style: TextStyle(fontSize: 12),
                 ),
               ),
@@ -242,123 +350,249 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                 Navigator.pop(context);
                 await _enableGoogleDriveSync();
               },
-              child: const Text('Enable Sync'),
+              child: const Text('Enable Cloud Backup'),
             ),
           ],
         ),
       );
     } catch (e) {
-      print('❌ Sync setup failed: $e');
+      print('❌ Google Drive setup failed: $e');
     }
   }
 
-  // Simple file-based Google Drive sync (uses Google Drive folder sync)
   Future<void> _enableGoogleDriveSync() async {
     try {
-      // Check if Google Drive desktop app is installed
-      final googleDrivePath = path.join(
-        Platform.environment['USERPROFILE'] ?? '',
-        'Google Drive',
-      );
+      final clientId = _clientId;
 
-      final googleDriveDir = Directory(googleDrivePath);
+      final authUrl = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', {
+        'client_id': clientId,
+        'redirect_uri': 'urn:ietf:wg:oauth:2.0:oob',
+        'response_type': 'code',
+        'scope': 'https://www.googleapis.com/auth/drive.file',
+        'access_type': 'offline',
+        'prompt': 'consent',
+      });
 
-      if (await googleDriveDir.exists()) {
-        // Use Google Drive folder
-        await _setupGoogleDriveFolder();
-      } else {
-        // Fallback: Show manual setup instructions
-        _showManualGoogleDriveSetup();
+      print('Opening browser for Google authentication...');
+
+      if (await canLaunchUrl(authUrl)) {
+        await launchUrl(authUrl, mode: LaunchMode.externalApplication);
+
+        // Show dialog for user to paste auth code
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) {
+              final codeController = TextEditingController();
+              return AlertDialog(
+                title: const Text('🔐 Google Drive Authentication'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'A browser window has opened.\n\n'
+                      '1. Sign in with your Google account\n'
+                      '2. Grant permission\n'
+                      '3. Copy the authorization code\n'
+                      '4. Paste it below',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: codeController,
+                      decoration: const InputDecoration(
+                        hintText: 'Paste authorization code here',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () async {
+                      final code = codeController.text;
+                      Navigator.pop(context);
+                      if (code.isNotEmpty) {
+                        await _exchangeCodeForToken(code);
+                      }
+                    },
+                    child: const Text('Authenticate'),
+                  ),
+                ],
+              );
+            },
+          );
+        }
       }
     } catch (e) {
-      print('❌ Google Drive sync failed: $e');
+      print('❌ Google Drive auth failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Auth failed: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     }
   }
 
-  Future<void> _setupGoogleDriveFolder() async {
+  Future<void> _exchangeCodeForToken(String code) async {
     try {
-      // Create iFocus folder in Google Drive
-      final googleDrivePath = path.join(
-        Platform.environment['USERPROFILE'] ?? '',
-        'Google Drive',
-        'iFocus_Backups',
+      final clientId = _clientId;
+      final clientSecret = _clientSecret;
+
+      final tokenUrl = Uri.https('oauth2.googleapis.com', '/token');
+
+      final response = await http.post(
+        tokenUrl,
+        body: {
+          'code': code,
+          'client_id': clientId,
+          'client_secret': clientSecret,
+          'redirect_uri': 'urn:ietf:wg:oauth:2.0:oob',
+          'grant_type': 'authorization_code',
+        },
       );
 
-      final syncDir = Directory(googleDrivePath);
-      if (!await syncDir.exists()) {
-        await syncDir.create(recursive: true);
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _googleAccessToken = data['access_token'];
+
+        // Save token for next time
+        await _saveToken(_googleAccessToken!);
+
+        await _setupWithToken();
+      } else {
+        print('❌ Token exchange failed: ${response.body}');
       }
+    } catch (e) {
+      print('❌ Exchange failed: $e');
+    }
+  }
+
+  Future<void> _setupWithToken() async {
+    try {
+      if (_googleAccessToken == null) return;
+
+      final headers = {'Authorization': 'Bearer $_googleAccessToken'};
+
+      // Create or get iFocus_Backups folder
+      await _createOrGetGoogleDriveFolder(headers);
+
+      _isGoogleDriveConnected = true;
 
       setState(() {
         _isSyncEnabled = true;
       });
 
-      // Start auto-sync timer (every 6 hours)
+      // Start auto-sync timer
       _autoSyncTimer?.cancel();
-      _autoSyncTimer = Timer.periodic(const Duration(hours: 6), (timer) {
+      _autoSyncTimer = Timer.periodic(const Duration(hours: 1), (timer) {
         _syncToGoogleDrive();
       });
 
-      // Perform initial sync
+      // Initial sync
       await _syncToGoogleDrive();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('✅ Google Drive sync enabled!'),
+          const SnackBar(
+            content: Text('✅ Cloud backup enabled!'),
             backgroundColor: Colors.green,
-            action: SnackBarAction(
-              label: 'Open Folder',
-              textColor: Colors.white,
-              onPressed: () {
-                Process.run('explorer', [googleDrivePath]);
-              },
-            ),
+            duration: Duration(seconds: 3),
           ),
         );
       }
     } catch (e) {
       print('❌ Setup failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Setup failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _createOrGetGoogleDriveFolder(
+    Map<String, String> headers,
+  ) async {
+    try {
+      // Search for existing iFocus_Backups folder
+      final query = Uri.encodeComponent(
+        "name='iFocus_Backups' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+      );
+      final searchUrl = Uri.parse(
+        'https://www.googleapis.com/drive/v3/files?q=$query&spaces=drive&pageSize=1',
+      );
+
+      final response = await http.get(searchUrl, headers: headers);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final files = data['files'] as List;
+
+        if (files.isNotEmpty) {
+          _googleDriveFolderId = files[0]['id'];
+          print('✅ Found existing folder: $_googleDriveFolderId');
+        } else {
+          // Create new folder
+          await _createGoogleDriveFolder(headers);
+        }
+      }
+    } catch (e) {
+      print('❌ Error creating/getting folder: $e');
+    }
+  }
+
+  Future<void> _createGoogleDriveFolder(Map<String, String> headers) async {
+    try {
+      final url = Uri.parse('https://www.googleapis.com/drive/v3/files');
+      final body = {
+        'name': 'iFocus_Backups',
+        'mimeType': 'application/vnd.google-apps.folder',
+      };
+
+      final response = await http.post(
+        url,
+        headers: {...headers, 'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _googleDriveFolderId = data['id'];
+        print('✅ Created folder: $_googleDriveFolderId');
+      }
+    } catch (e) {
+      print('❌ Error creating folder: $e');
     }
   }
 
   Future<void> _syncToGoogleDrive() async {
     try {
-      if (!_isSyncEnabled || _dataFile == null) return;
+      if (!_isSyncEnabled || !_isGoogleDriveConnected || _dataFile == null)
+        return;
+      if (_googleAccessToken == null) return;
 
-      final googleDrivePath = path.join(
-        Platform.environment['USERPROFILE'] ?? '',
-        'Google Drive',
-        'iFocus_Backups',
-      );
+      final headers = {'Authorization': 'Bearer $_googleAccessToken'};
 
-      final syncDir = Directory(googleDrivePath);
-      if (!await syncDir.exists()) {
-        await syncDir.create(recursive: true);
-      }
-
-      // Copy current data file
+      // Upload file to Google Drive
       final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-      final syncFile = File(
-        path.join(syncDir.path, 'ifocus_sync_$timestamp.json'),
-      );
+      final fileName = 'ifocus_backup_$timestamp.json';
 
-      await _dataFile!.copy(syncFile.path);
+      await _uploadToGoogleDrive(fileName, headers);
 
-      // Keep only last 10 synced backups
-      final syncedFiles =
-          syncDir
-              .listSync()
-              .whereType<File>()
-              .where((f) => f.path.contains('ifocus_sync_'))
-              .toList()
-            ..sort((a, b) => b.path.compareTo(a.path));
-
-      if (syncedFiles.length > 10) {
-        for (var i = 10; i < syncedFiles.length; i++) {
-          await syncedFiles[i].delete();
-        }
-      }
+      // Clean up old backups
+      await _cleanupOldGoogleDriveBackups(headers);
 
       setState(() {
         _lastSyncTime = DateTime.now();
@@ -368,63 +602,120 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
         '☁️ Synced to Google Drive at ${DateFormat('HH:mm').format(_lastSyncTime!)}',
       );
     } catch (e) {
-      print('❌ Sync failed: $e');
+      print('❌ Google Drive sync failed: $e');
     }
   }
 
-  void _showManualGoogleDriveSetup() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('📋 Manual Google Drive Setup'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Google Drive desktop app not detected.',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 16),
-              const Text('Option 1: Install Google Drive Desktop'),
-              const SizedBox(height: 8),
-              Text(
-                '1. Download from: drive.google.com/drive/download\n'
-                '2. Install and sign in\n'
-                '3. Come back and enable sync again',
-                style: TextStyle(color: Colors.grey[400], fontSize: 13),
-              ),
-              const SizedBox(height: 16),
-              const Text('Option 2: Manual Backup'),
-              const SizedBox(height: 8),
-              Text(
-                '1. Click "Data Location" button\n'
-                '2. Copy your data folder to Google Drive manually\n'
-                '3. Do this weekly to stay safe',
-                style: TextStyle(color: Colors.grey[400], fontSize: 13),
-              ),
-            ],
+  Future<void> _uploadToGoogleDrive(
+    String fileName,
+    Map<String, String> headers,
+  ) async {
+    try {
+      if (_googleDriveFolderId == null || _dataFile == null) return;
+
+      final url = Uri.parse(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+      );
+
+      final fileContent = await _dataFile!.readAsBytes();
+      final metadata = {
+        'name': fileName,
+        'parents': [_googleDriveFolderId],
+      };
+
+      final request = http.MultipartRequest('POST', url);
+      request.headers.addAll(headers);
+      request.fields['metadata'] = jsonEncode(metadata);
+      request.files.add(
+        http.MultipartFile.fromBytes('file', fileContent, filename: fileName),
+      );
+
+      final response = await request.send();
+      if (response.statusCode == 200) {
+        print('✅ File uploaded: $fileName');
+      } else {
+        print('❌ Upload failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('❌ Upload error: $e');
+    }
+  }
+
+  Future<void> _cleanupOldGoogleDriveBackups(
+    Map<String, String> headers,
+  ) async {
+    try {
+      if (_googleDriveFolderId == null) return;
+
+      // List files in folder
+      final query = Uri.encodeComponent(
+        "'$_googleDriveFolderId' in parents and trashed=false",
+      );
+      final url = Uri.parse(
+        'https://www.googleapis.com/drive/v3/files?q=$query&orderBy=createdTime%20desc&pageSize=50',
+      );
+
+      final response = await http.get(url, headers: headers);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final files = data['files'] as List;
+
+        // Delete files older than 10th
+        for (var i = 10; i < files.length; i++) {
+          final fileId = files[i]['id'];
+          await _deleteGoogleDriveFile(fileId, headers);
+        }
+      }
+    } catch (e) {
+      print('❌ Cleanup error: $e');
+    }
+  }
+
+  Future<void> _deleteGoogleDriveFile(
+    String fileId,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final url = Uri.parse(
+        'https://www.googleapis.com/drive/v3/files/$fileId',
+      );
+      final response = await http.delete(url, headers: headers);
+
+      if (response.statusCode == 204) {
+        print('🗑️ Deleted old backup: $fileId');
+      }
+    } catch (e) {
+      print('❌ Delete error: $e');
+    }
+  }
+
+  Future<void> _disconnectGoogleDrive() async {
+    try {
+      final tokenFile = File(_tokenFilePath);
+      if (tokenFile.existsSync()) {
+        tokenFile.deleteSync();
+      }
+      _googleAccessToken = null;
+      _googleDriveFolderId = null;
+      _isGoogleDriveConnected = false;
+      _isSyncEnabled = false;
+      _autoSyncTimer?.cancel();
+
+      setState(() {});
+
+      print('✅ Disconnected from Google Drive');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ Google Drive disconnected'),
+            backgroundColor: Colors.green,
           ),
-        ),
-        actions: [
-          TextButton.icon(
-            onPressed: () async {
-              final uri = Uri.parse('https://www.google.com/drive/download/');
-              if (await canLaunchUrl(uri)) {
-                await launchUrl(uri);
-              }
-            },
-            icon: const Icon(Icons.download),
-            label: const Text('Download Drive'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
+        );
+      }
+    } catch (e) {
+      print('❌ Disconnect error: $e');
+    }
   }
 
   // NEW: Restore from Google Drive
@@ -2041,141 +2332,187 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                     ),
                   ),
                 ),
-                // Bottom buttons in sidebar
+                // Scrollable, collapsible sidebar
                 Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: () => _showHistoryDialog(),
-                        icon: const Icon(Icons.history, size: 20),
-                        label: const Text('History'),
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      ElevatedButton.icon(
-                        onPressed: () => _showAnalyticsDialog(),
-                        icon: const Icon(Icons.analytics, size: 20),
-                        label: const Text('Analytics'),
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      ElevatedButton.icon(
-                        onPressed: () => _showWeekPlanDialog(),
-                        icon: const Icon(Icons.calendar_month, size: 20),
-                        label: const Text('Week Plan'),
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-
-                      // NEW: Google Drive Sync
-                      ElevatedButton.icon(
-                        onPressed: _isSyncEnabled
-                            ? _syncToGoogleDrive
-                            : _setupGoogleDriveSync,
-                        icon: Icon(
-                          _isSyncEnabled ? Icons.cloud_done : Icons.cloud_off,
-                          size: 20,
-                        ),
-                        label: Text(
-                          _isSyncEnabled ? 'Sync Now' : 'Enable Sync',
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                          backgroundColor: _isSyncEnabled
-                              ? Colors.blue[700]
-                              : Colors.grey[700],
-                        ),
-                      ),
-                      if (_lastSyncTime != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Text(
-                            'Last sync: ${DateFormat('HH:mm').format(_lastSyncTime!)}',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.grey[500],
+                  padding: const EdgeInsets.all(16),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // ===== Tracking Section =====
+                        ExpansionTile(
+                          title: const Text(
+                            'Tracking',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          children: [
+                            ElevatedButton.icon(
+                              onPressed: _showHistoryDialog,
+                              icon: const Icon(Icons.history, size: 18),
+                              label: const Text(
+                                'History',
+                                style: TextStyle(fontSize: 14),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                              ),
                             ),
-                          ),
+                            const SizedBox(height: 6),
+                            ElevatedButton.icon(
+                              onPressed: _showAnalyticsDialog,
+                              icon: const Icon(Icons.analytics, size: 18),
+                              label: const Text(
+                                'Analytics',
+                                style: TextStyle(fontSize: 14),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            ElevatedButton.icon(
+                              onPressed: _showWeekPlanDialog,
+                              icon: const Icon(Icons.calendar_month, size: 18),
+                              label: const Text(
+                                'Week Plan',
+                                style: TextStyle(fontSize: 14),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                              ),
+                            ),
+                          ],
                         ),
 
-                      const SizedBox(height: 10),
-                      ElevatedButton.icon(
-                        onPressed: _createManualBackup,
-                        icon: const Icon(Icons.backup, size: 20),
-                        label: const Text('Backup Now'),
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                          backgroundColor: Colors.green[700],
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      OutlinedButton.icon(
-                        onPressed: _showDataLocation,
-                        icon: const Icon(Icons.folder_open, size: 20),
-                        label: const Text('Data Location'),
-                        style: OutlinedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      OutlinedButton.icon(
-                        onPressed: _undoLastDay,
-                        icon: const Icon(Icons.undo, size: 20),
-                        label: const Text('Undo Day'),
-                        style: OutlinedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 45),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
+                        const SizedBox(height: 12),
 
-                      // NEW: Restore with dropdown
-                      PopupMenuButton<String>(
-                        child: OutlinedButton.icon(
-                          onPressed: null,
-                          icon: const Icon(Icons.restore, size: 20),
-                          label: const Text('Restore'),
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 45),
+                        // ===== Backup & Sync Section =====
+                        ExpansionTile(
+                          title: const Text(
+                            'Backup & Sync',
+                            style: TextStyle(fontWeight: FontWeight.bold),
                           ),
+                          children: [
+                            ElevatedButton.icon(
+                              onPressed: _isGoogleDriveConnected
+                                  ? _syncToGoogleDrive
+                                  : _setupGoogleDriveSync,
+                              icon: Icon(
+                                _isGoogleDriveConnected
+                                    ? Icons.cloud_done
+                                    : Icons.cloud_off,
+                                size: 18,
+                              ),
+                              label: Text(
+                                _isGoogleDriveConnected
+                                    ? 'Sync Now'
+                                    : 'Enable Sync',
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                                backgroundColor: _isGoogleDriveConnected
+                                    ? Colors.blue[700]
+                                    : Colors.grey[700],
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            ElevatedButton.icon(
+                              onPressed: _createManualBackup,
+                              icon: const Icon(Icons.backup, size: 18),
+                              label: const Text(
+                                'Backup Now',
+                                style: TextStyle(fontSize: 14),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                                backgroundColor: Colors.green[700],
+                              ),
+                            ),
+                          ],
                         ),
-                        itemBuilder: (context) => [
-                          const PopupMenuItem(
-                            value: 'local',
-                            child: Row(
-                              children: [
-                                Icon(Icons.folder),
-                                SizedBox(width: 8),
-                                Text('From Local Backup'),
+
+                        const SizedBox(height: 12),
+
+                        // ===== Data Management Section =====
+                        ExpansionTile(
+                          title: const Text(
+                            'Data Management',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: _showDataLocation,
+                              icon: const Icon(Icons.folder_open, size: 18),
+                              label: const Text(
+                                'Data Location',
+                                style: TextStyle(fontSize: 14),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            OutlinedButton.icon(
+                              onPressed: _undoLastDay,
+                              icon: const Icon(Icons.undo, size: 18),
+                              label: const Text(
+                                'Undo Day',
+                                style: TextStyle(fontSize: 14),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                minimumSize: const Size(double.infinity, 38),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+
+                            // Restore with popup menu
+                            PopupMenuButton<String>(
+                              child: OutlinedButton.icon(
+                                onPressed: null,
+                                icon: const Icon(Icons.restore, size: 18),
+                                label: const Text(
+                                  'Restore',
+                                  style: TextStyle(fontSize: 14),
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  minimumSize: const Size(double.infinity, 38),
+                                ),
+                              ),
+                              itemBuilder: (context) => [
+                                const PopupMenuItem(
+                                  value: 'local',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.folder),
+                                      SizedBox(width: 8),
+                                      Text('From Local Backup'),
+                                    ],
+                                  ),
+                                ),
+                                const PopupMenuItem(
+                                  value: 'drive',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.cloud),
+                                      SizedBox(width: 8),
+                                      Text('From Google Drive'),
+                                    ],
+                                  ),
+                                ),
                               ],
+                              onSelected: (value) {
+                                if (value == 'local') {
+                                  _restoreFromBackup();
+                                } else if (value == 'drive') {
+                                  _restoreFromGoogleDrive();
+                                }
+                              },
                             ),
-                          ),
-                          const PopupMenuItem(
-                            value: 'drive',
-                            child: Row(
-                              children: [
-                                Icon(Icons.cloud),
-                                SizedBox(width: 8),
-                                Text('From Google Drive'),
-                              ],
-                            ),
-                          ),
-                        ],
-                        onSelected: (value) {
-                          if (value == 'local') {
-                            _restoreFromBackup();
-                          } else if (value == 'drive') {
-                            _restoreFromGoogleDrive();
-                          }
-                        },
-                      ),
-                    ],
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
