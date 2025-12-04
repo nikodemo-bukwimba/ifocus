@@ -6,7 +6,7 @@
 #define MyAppPublisher "Issubi Academy"
 #define MyAppURL "https://issubiacademy.com"
 #define MyAppExeName "ifocus.exe"
-#define MyAppId "{{0856f969-9dc1-4ce7-83fd-e4dd6abb5056}}"
+#define MyAppId "{{6b483229-aa8a-4827-a384-4b48e779cb52}}"
 
 [Setup]
 ; App identification

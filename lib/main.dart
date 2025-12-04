@@ -55,6 +55,16 @@ class IfocusApp extends StatelessWidget {
   }
 }
 
+extension ListExtension<T> on List<T> {
+  T? firstWhereOrNull(bool Function(T) test) {
+    try {
+      return firstWhere(test);
+    } catch (e) {
+      return null;
+    }
+  }
+}
+
 class Task {
   String id;
   String title;
@@ -101,30 +111,106 @@ class Task {
   );
 }
 
+// ADD THESE NEW CLASSES to replace the WeeklyPlan class
 class WeeklyPlan {
   DateTime weekStart;
-  Map<String, List<String>> goals;
-  Map<String, String> notes;
+  Map<String, DayPlan> dayPlans; // Changed from goals/notes to dayPlans
 
-  WeeklyPlan({
-    required this.weekStart,
-    required this.goals,
-    required this.notes,
-  });
+  WeeklyPlan({required this.weekStart, required this.dayPlans});
 
   Map<String, dynamic> toJson() => {
     'weekStart': weekStart.toIso8601String(),
-    'goals': goals,
+    'dayPlans': dayPlans.map((k, v) => MapEntry(k, v.toJson())),
+  };
+
+  factory WeeklyPlan.fromJson(Map<String, dynamic> json) {
+    final raw = json['dayPlans'] as Map?;
+
+    final mapped = raw != null
+        ? raw.map((k, v) => MapEntry(k.toString(), DayPlan.fromJson(v)))
+        : <String, DayPlan>{};
+
+    return WeeklyPlan(
+      weekStart: DateTime.parse(json['weekStart']),
+      dayPlans: mapped,
+    );
+  }
+}
+
+// NEW: Detailed day plan structure
+class DayPlan {
+  String dayName;
+  String? description;
+  List<GoalGroup> goalGroups;
+  String? notes;
+
+  DayPlan({
+    required this.dayName,
+    this.description,
+    List<GoalGroup>? goalGroups,
+    this.notes,
+  }) : goalGroups = goalGroups ?? []; // mutable empty list by default
+  Map<String, dynamic> toJson() => {
+    'dayName': dayName,
+    'description': description,
+    'goalGroups': goalGroups.map((g) => g.toJson()).toList(),
     'notes': notes,
   };
 
-  factory WeeklyPlan.fromJson(Map<String, dynamic> json) => WeeklyPlan(
-    weekStart: DateTime.parse(json['weekStart']),
-    goals: Map<String, List<String>>.from(
-      json['goals'].map((k, v) => MapEntry(k, List<String>.from(v))),
-    ),
-    notes: Map<String, String>.from(json['notes']),
+  factory DayPlan.fromJson(Map<String, dynamic> json) => DayPlan(
+    dayName: json['dayName'],
+    description: json['description'],
+    goalGroups:
+        (json['goalGroups'] as List?)
+            ?.map((g) => GoalGroup.fromJson(g))
+            .toList() ??
+        [],
+    notes: json['notes'],
   );
+}
+
+class Goal {
+  String title;
+  bool isCompleted;
+
+  Goal({required this.title, this.isCompleted = false});
+
+  Map<String, dynamic> toJson() => {'title': title, 'isCompleted': isCompleted};
+
+  factory Goal.fromJson(Map<String, dynamic> json) =>
+      Goal(title: json['title'], isCompleted: json['isCompleted'] ?? false);
+}
+
+class GoalGroup {
+  String category;
+  String? categoryDescription;
+  List<Goal> goals; // make sure this is a class Goal, not just String
+
+  GoalGroup({
+    required this.category,
+    this.categoryDescription,
+    this.goals = const [],
+  });
+
+  // Add this method
+  Map<String, dynamic> toJson() {
+    return {
+      'category': category,
+      'categoryDescription': categoryDescription,
+      'goals': goals.map((g) => g.toJson()).toList(),
+    };
+  }
+
+  // Optional: fromJson
+  factory GoalGroup.fromJson(Map<String, dynamic> json) {
+    return GoalGroup(
+      category: json['category'],
+      categoryDescription: json['categoryDescription'],
+      goals: (json['goals'] as List<dynamic>)
+          .map((g) => Goal.fromJson(g))
+          .toList(),
+    );
+  }
 }
 
 class TrackerHomePage extends StatefulWidget {
@@ -190,7 +276,10 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
       _loadData();
       _startNotificationChecker();
       _checkHostsFilePermissions();
+      _syncWeeklyGoalsToTasks();
+      _syncTasksBackToGoals();
     });
+    _syncWeeklyGoalsToTasks();
     _loadSavedToken();
   }
 
@@ -2272,7 +2361,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                               child: Column(
                                 children: [
                                   const Text(
-                                    '🍅 Pomodoro Running',
+                                    'ðŸ… Pomodoro Running',
                                     style: TextStyle(
                                       fontWeight: FontWeight.bold,
                                     ),
@@ -2648,14 +2737,18 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
 
                   const SizedBox(height: 30),
 
-                  // Tasks list - Fixed overflow
+                  // Tasks list - WITH WEEKLY GOALS AT TOP
                   Expanded(
-                    child: ListView.builder(
-                      itemCount: todayTasks.length,
-                      itemBuilder: (context, index) {
-                        final task = todayTasks[index];
-                        return _buildTaskCard(task);
-                      },
+                    child: ListView(
+                      children: [
+                        // Weekly goals section appears ONCE at the top
+                        _buildWeeklyGoalsSection(),
+
+                        // Then all tasks below
+                        ...todayTasks
+                            .map((task) => _buildTaskCard(task))
+                            .toList(),
+                      ],
                     ),
                   ),
 
@@ -2689,149 +2782,6 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildTaskCard(Task task) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: task.isCompleted
-              ? Colors.green.withOpacity(0.5)
-              : Colors.transparent,
-        ),
-      ),
-      child: ListTile(
-        leading: Checkbox(
-          value: task.isCompleted,
-          activeColor: Colors.green,
-          onChanged: (value) {
-            setState(() {
-              task.isCompleted = value ?? false;
-            });
-            _saveData();
-          },
-        ),
-        title: Text(
-          task.title,
-          style: TextStyle(
-            decoration: task.isCompleted ? TextDecoration.lineThrough : null,
-            color: task.isCompleted ? Colors.grey[500] : Colors.white,
-          ),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              task.category,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.deepPurpleAccent,
-              ),
-            ),
-            if (task.scheduledTime != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.access_time,
-                      size: 14,
-                      color: Colors.orange,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      DateFormat('HH:mm').format(task.scheduledTime!),
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.orange,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            if (task.pomodoroCount > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  '🍅 ${task.pomodoroCount} pomodoro${task.pomodoroCount > 1 ? 's' : ''}',
-                  style: const TextStyle(fontSize: 12, color: Colors.red),
-                ),
-              ),
-          ],
-        ),
-        trailing: PopupMenuButton(
-          itemBuilder: (context) => [
-            const PopupMenuItem(
-              value: 'pomodoro',
-              child: Row(
-                children: [
-                  Icon(Icons.timer),
-                  SizedBox(width: 8),
-                  Text('Start Pomodoro'),
-                ],
-              ),
-            ),
-            const PopupMenuItem(
-              value: 'schedule',
-              child: Row(
-                children: [
-                  Icon(Icons.schedule),
-                  SizedBox(width: 8),
-                  Text('Set Time'),
-                ],
-              ),
-            ),
-            const PopupMenuItem(
-              value: 'notes',
-              child: Row(
-                children: [
-                  Icon(Icons.note),
-                  SizedBox(width: 8),
-                  Text('Add Notes'),
-                ],
-              ),
-            ),
-            const PopupMenuItem(
-              value: 'delete',
-              child: Row(
-                children: [
-                  Icon(Icons.delete, color: Colors.red),
-                  SizedBox(width: 8),
-                  Text('Delete'),
-                ],
-              ),
-            ),
-          ],
-          onSelected: (value) {
-            if (value == 'pomodoro') {
-              if (!isPomodoroRunning) {
-                _startPomodoro(task);
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Stop current pomodoro first'),
-                    backgroundColor: Colors.orange,
-                  ),
-                );
-              }
-            } else if (value == 'schedule') {
-              _scheduleTask(task);
-            } else if (value == 'notes') {
-              _editTaskNotes(task);
-            } else if (value == 'delete') {
-              setState(() {
-                todayTasks.remove(task);
-              });
-              _saveData();
-            }
-          },
-        ),
       ),
     );
   }
@@ -3208,133 +3158,565 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     );
   }
 
+  // UPDATE: _showWeekPlanDialog method
   void _showWeekPlanDialog() {
-    final weekStart = _getWeekStart(selectedDate);
-    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
-
-    if (currentWeekPlan == null) {
-      currentWeekPlan = WeeklyPlan(weekStart: weekStart, goals: {}, notes: {});
-      weeklyPlans[weekKey] = currentWeekPlan!;
-    }
-
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          'Week Plan: ${DateFormat('MMM dd').format(weekStart)} - ${DateFormat('MMM dd').format(weekStart.add(const Duration(days: 6)))}',
-        ),
-        content: SizedBox(
-          width: 600,
-          height: 500,
-          child: ListView.builder(
-            itemCount: 7,
-            itemBuilder: (context, index) {
-              final day = weekStart.add(Duration(days: index));
-              final dayKey = DateFormat('EEEE').format(day);
-              final goals = currentWeekPlan!.goals[dayKey] ?? [];
-
-              return Card(
-                margin: const EdgeInsets.only(bottom: 12),
-                child: ExpansionTile(
-                  title: Text(DateFormat('EEEE, MMM dd').format(day)),
-                  subtitle: Text('${goals.length} goals'),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return Dialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Container(
+                width: MediaQuery.of(context).size.width * 0.8,
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.9,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0D1129),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Column(
                   children: [
+                    // Header
                     Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      padding: const EdgeInsets.all(20),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          ...goals
-                              .map(
-                                (goal) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.check_circle_outline,
-                                        size: 16,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(child: Text(goal)),
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.delete,
-                                          size: 16,
-                                        ),
-                                        onPressed: () {
-                                          setState(() {
-                                            goals.remove(goal);
-                                          });
-                                          _saveData();
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              )
-                              .toList(),
-                          ElevatedButton.icon(
+                          const Text(
+                            'Weekly Plan',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close),
                             onPressed: () {
+                              // Sync and refresh when closing dialog
+                              _syncWeeklyGoalsToTasks();
+                              setState(() {});
                               Navigator.pop(context);
-                              _addWeekGoal(dayKey);
                             },
-                            icon: const Icon(Icons.add),
-                            label: const Text('Add Goal'),
                           ),
                         ],
                       ),
                     ),
+                    const Divider(),
+
+                    // Weekly plan cards - SCROLLABLE
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(20),
+                        child: Column(
+                          children: _buildWeeklyPlanCards(setDialogState),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
-              );
-            },
-          ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // NEW: Separate method that builds weekly cards and accepts setDialogState
+  List<Widget> _buildWeeklyPlanCards(StateSetter setDialogState) {
+    final weekStart = _getWeekStart(selectedDate);
+    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+
+    currentWeekPlan =
+        weeklyPlans[weekKey] ??
+        WeeklyPlan(
+          weekStart: weekStart,
+          dayPlans: {
+            'Monday': DayPlan(dayName: 'Monday'),
+            'Tuesday': DayPlan(dayName: 'Tuesday'),
+            'Wednesday': DayPlan(dayName: 'Wednesday'),
+            'Thursday': DayPlan(dayName: 'Thursday'),
+            'Friday': DayPlan(dayName: 'Friday'),
+            'Saturday': DayPlan(dayName: 'Saturday'),
+            'Sunday': DayPlan(dayName: 'Sunday'),
+          },
+        );
+
+    final days = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    final cards = <Widget>[];
+
+    for (int i = 0; i < days.length; i++) {
+      final day = weekStart.add(Duration(days: i));
+      final dayKey = days[i];
+      final dayPlan =
+          currentWeekPlan!.dayPlans[dayKey] ?? DayPlan(dayName: dayKey);
+
+      cards.add(
+        _buildWeeklyDayCardForDialog(
+          day,
+          dayKey,
+          dayPlan,
+          i,
+          setDialogState, // Pass setDialogState
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              _saveData();
-              Navigator.pop(context);
-            },
-            child: const Text('Close'),
-          ),
-        ],
+      );
+    }
+
+    return cards;
+  }
+
+  Widget _buildStatCard(String title, String value, String subtitle) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.grey[850],
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.3)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.grey,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 20,
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              subtitle,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  void _addWeekGoal(String dayKey) {
-    final controller = TextEditingController();
+  // UPDATE: _buildWeeklyDayCard to accept setDialogState for instant refresh
+  Widget _buildWeeklyDayCardForDialog(
+    DateTime day,
+    String dayKey,
+    DayPlan dayPlan,
+    int index,
+    StateSetter setDialogState, // Add this parameter
+  ) {
+    final isToday =
+        DateFormat('yyyy-MM-dd').format(day) ==
+        DateFormat('yyyy-MM-dd').format(selectedDate);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: isToday ? Colors.deepPurpleAccent : Colors.transparent,
+          width: 2,
+        ),
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [
+              isToday
+                  ? Colors.deepPurpleAccent.withOpacity(0.1)
+                  : Colors.transparent,
+              Colors.transparent,
+            ],
+          ),
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            tilePadding: const EdgeInsets.symmetric(
+              horizontal: 20,
+              vertical: 12,
+            ),
+            title: Row(
+              children: [
+                Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isToday ? Colors.deepPurpleAccent : Colors.grey[800],
+                  ),
+                  child: Center(
+                    child: Text(
+                      (index + 1).toString(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        dayKey,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      Text(
+                        DateFormat('MMM dd, yyyy').format(day),
+                        style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                      ),
+                    ],
+                  ),
+                ),
+                if (isToday)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurpleAccent.withOpacity(0.3),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.deepPurpleAccent),
+                    ),
+                    child: const Text(
+                      'Today',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.deepPurpleAccent,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Description field
+                    TextFormField(
+                      initialValue: dayPlan.description ?? '',
+                      decoration: InputDecoration(
+                        labelText: 'Day Theme/Focus',
+                        hintText: 'e.g., "MVP Development Sprint"',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey[900],
+                      ),
+                      maxLines: 2,
+                      onChanged: (value) {
+                        setDialogState(() {
+                          // Use setDialogState instead of setState
+                          dayPlan.description = value;
+                          currentWeekPlan!.dayPlans[dayKey] = dayPlan;
+                        });
+                        _saveData();
+                      },
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Focus Areas header
+                    const Text(
+                      'Focus Areas',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Goal groups
+                    if (dayPlan.goalGroups.isEmpty)
+                      Text(
+                        'No focus areas yet. Add one below.',
+                        style: TextStyle(color: Colors.grey[500], fontSize: 13),
+                      )
+                    else
+                      ...dayPlan.goalGroups
+                          .map(
+                            (group) => _buildGoalGroupCardForDialog(
+                              dayKey,
+                              group,
+                              setDialogState,
+                            ),
+                          )
+                          .toList(),
+
+                    const SizedBox(height: 16),
+
+                    // Add goal group
+                    OutlinedButton.icon(
+                      onPressed: () =>
+                          _addGoalGroupDialog(dayKey, dayPlan, setDialogState),
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add Focus Area'),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(double.infinity, 40),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Day Notes
+                    TextFormField(
+                      initialValue: dayPlan.notes ?? '',
+                      decoration: InputDecoration(
+                        labelText: 'Day Notes',
+                        hintText: 'Any additional notes or reminders...',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey[900],
+                      ),
+                      maxLines: 3,
+                      onChanged: (value) {
+                        setDialogState(() {
+                          // Use setDialogState
+                          dayPlan.notes = value;
+                          currentWeekPlan!.dayPlans[dayKey] = dayPlan;
+                        });
+                        _saveData();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // UPDATE: _buildGoalGroupCard for dialog with setDialogState
+  Widget _buildGoalGroupCardForDialog(
+    String dayKey,
+    GoalGroup group,
+    StateSetter setDialogState,
+  ) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: Colors.grey[900],
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header with delete
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        group.category,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      if (group.categoryDescription != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            group.categoryDescription!,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey[400],
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  onPressed: () {
+                    setDialogState(() {
+                      final dayPlan = currentWeekPlan!.dayPlans[dayKey];
+                      dayPlan?.goalGroups.remove(group);
+                    });
+                    _saveData();
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // Goals with interactive checkboxes
+            ...group.goals.asMap().entries.map((entry) {
+              int goalIndex = entry.key;
+              Goal goal = entry.value;
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Checkbox(
+                      value: goal.isCompleted,
+                      activeColor: Colors.green,
+                      onChanged: (value) {
+                        setDialogState(() {
+                          group.goals[goalIndex].isCompleted = value ?? false;
+                          _syncWeeklyGoalsToTasks();
+                        });
+                        _saveData();
+                      },
+                    ),
+                    Expanded(
+                      child: Text(
+                        goal.title,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: goal.isCompleted ? Colors.grey : Colors.white,
+                          decoration: goal.isCompleted
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 16),
+                      onPressed: () {
+                        setDialogState(() {
+                          group.goals.removeAt(goalIndex);
+                        });
+                        _saveData();
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: () => _addGoalToGroupDialog(dayKey, group, setDialogState),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.add,
+                      size: 16,
+                      color: Colors.deepPurpleAccent,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Add Goal',
+                      style: TextStyle(
+                        color: Colors.deepPurpleAccent,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // NEW: Add goal group dialog with setDialogState
+  void _addGoalGroupDialog(
+    String dayKey,
+    DayPlan dayPlan,
+    StateSetter setDialogState,
+  ) {
+    final categoryController = TextEditingController();
+    final descriptionController = TextEditingController();
 
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Add Goal for $dayKey'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: 'Goal',
-            border: OutlineInputBorder(),
-          ),
-          maxLines: 2,
+        title: const Text('Add Focus Area'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: categoryController,
+              decoration: const InputDecoration(
+                labelText: 'Category Name',
+                hintText: 'e.g., "Technical Development"',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: descriptionController,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+                hintText: 'What is this focus area about?',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 2,
+            ),
+          ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel'),
           ),
-          TextButton(
+          ElevatedButton(
             onPressed: () {
-              if (controller.text.isNotEmpty) {
-                setState(() {
-                  if (currentWeekPlan!.goals[dayKey] == null) {
-                    currentWeekPlan!.goals[dayKey] = [];
-                  }
-                  currentWeekPlan!.goals[dayKey]!.add(controller.text);
+              if (categoryController.text.isNotEmpty) {
+                setDialogState(() {
+                  final newGroup = GoalGroup(
+                    category: categoryController.text,
+                    categoryDescription: descriptionController.text.isEmpty
+                        ? null
+                        : descriptionController.text,
+                    goals: <Goal>[],
+                  );
+                  dayPlan.goalGroups.add(newGroup);
+                  currentWeekPlan!.dayPlans[dayKey] = dayPlan;
                 });
                 _saveData();
                 Navigator.pop(context);
-                _showWeekPlanDialog();
               }
             },
             child: const Text('Add'),
@@ -3344,43 +3726,646 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     );
   }
 
-  Widget _buildStatCard(String label, String value, String subtitle) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1F3A),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.2)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey[500],
-              fontWeight: FontWeight.w600,
-            ),
+  // NEW: Add goal to group dialog with setDialogState
+  void _addGoalToGroupDialog(
+    String dayKey,
+    GoalGroup group,
+    StateSetter setDialogState,
+  ) {
+    final goalController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Add Goal'),
+        content: TextField(
+          controller: goalController,
+          decoration: const InputDecoration(
+            labelText: 'Goal',
+            hintText: 'What do you want to achieve?',
+            border: OutlineInputBorder(),
           ),
-          const SizedBox(height: 8),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
+          maxLines: 2,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
           ),
-          const SizedBox(height: 4),
-          Text(
-            subtitle,
-            style: TextStyle(fontSize: 10, color: Colors.grey[600]),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+          ElevatedButton(
+            onPressed: () {
+              if (goalController.text.isNotEmpty) {
+                setDialogState(() {
+                  group.goals = [...group.goals];
+                  group.goals.add(
+                    Goal(title: goalController.text, isCompleted: false),
+                  );
+                });
+                _saveData();
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('Add'),
           ),
         ],
+      ),
+    );
+  }
+
+  // ============================================
+  // ADD THESE NEW METHODS HERE (right after _getWeekStart)
+  // ============================================
+
+  /// Calculate weekly progress for today
+  ({int total, int completed}) _getWeeklyProgress() {
+    final dayKey = DateFormat('EEEE').format(selectedDate);
+    final weekStart = _getWeekStart(selectedDate);
+    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+
+    final weekPlan = weeklyPlans[weekKey];
+    final dayPlan = weekPlan?.dayPlans[dayKey];
+
+    if (dayPlan == null) {
+      return (total: 0, completed: 0);
+    }
+
+    int total = 0;
+    int completed = 0;
+
+    for (var group in dayPlan.goalGroups) {
+      total += group.goals.length;
+      completed += group.goals.where((g) => g.isCompleted).length;
+    }
+
+    return (total: total, completed: completed);
+  }
+
+  /// Safely get today's day plan
+  DayPlan? _getTodayDayPlan() {
+    final dayKey = DateFormat('EEEE').format(selectedDate);
+    final weekStart = _getWeekStart(selectedDate);
+    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+
+    return weeklyPlans[weekKey]?.dayPlans[dayKey];
+  }
+
+  /// Sync all weekly goals of the selected day into today's tasks
+  void _syncWeeklyGoalsToTasks() {
+    final dayKey = DateFormat('EEEE').format(selectedDate);
+    final weekStart = _getWeekStart(selectedDate);
+    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+
+    final weekPlan = weeklyPlans[weekKey];
+    final dayPlan = weekPlan?.dayPlans[dayKey];
+
+    if (dayPlan == null || dayPlan.goalGroups.isEmpty) {
+      return; // No weekly goals to sync
+    }
+
+    // For each goal group and goal, ensure a task exists
+    for (var group in dayPlan.goalGroups) {
+      for (var goal in group.goals) {
+        // Check if task already exists (by title + category combo)
+        final taskExists = todayTasks.any(
+          (t) => t.title == goal.title && t.category == group.category,
+        );
+
+        if (!taskExists) {
+          // Create new task from goal
+          todayTasks.add(
+            Task(
+              id: '${group.category}_${goal.title}'.hashCode.toString(),
+              title: goal.title,
+              category: group.category,
+              isCompleted: goal.isCompleted, // Sync completion state
+            ),
+          );
+        } else {
+          // Update existing task's completion state
+          final task = todayTasks.firstWhere(
+            (t) => t.title == goal.title && t.category == group.category,
+          );
+          task.isCompleted = goal.isCompleted;
+        }
+      }
+    }
+  }
+
+  void _syncTasksBackToGoals() {
+    final dayKey = DateFormat('EEEE').format(selectedDate);
+    final weekStart = _getWeekStart(selectedDate);
+    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+
+    final weekPlan = weeklyPlans[weekKey];
+    final dayPlan = weekPlan?.dayPlans[dayKey];
+
+    if (dayPlan == null) return;
+
+    // Update goal completion based on task status
+    for (var group in dayPlan.goalGroups) {
+      for (var goal in group.goals) {
+        final matchingTask = todayTasks.firstWhereOrNull(
+          (t) => t.title == goal.title && t.category == group.category,
+        );
+
+        if (matchingTask != null) {
+          goal.isCompleted = matchingTask.isCompleted;
+        }
+      }
+    }
+  }
+
+  // UPDATED: _buildWeeklyGoalsSection with instant refresh on changes
+  Widget _buildWeeklyGoalsSection() {
+    final dayPlan = _getTodayDayPlan();
+    final hasWeeklyGoals = dayPlan != null && dayPlan.goalGroups.isNotEmpty;
+
+    if (!hasWeeklyGoals) {
+      return const SizedBox.shrink();
+    }
+
+    final progress = _getWeeklyProgress();
+
+    return StatefulBuilder(
+      builder: (context, setLocalState) {
+        return Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            color: Colors.deepPurpleAccent.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.3)),
+          ),
+          child: Theme(
+            data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              leading: const Icon(
+                Icons.calendar_month,
+                color: Colors.deepPurpleAccent,
+              ),
+              title: const Text(
+                "This Week's Focus",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.deepPurpleAccent,
+                ),
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${progress.completed}/${progress.total} completed',
+                    style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                  ),
+                  const SizedBox(height: 6),
+                  LinearProgressIndicator(
+                    value: progress.total > 0
+                        ? progress.completed / progress.total
+                        : 0,
+                    color: Colors.deepPurpleAccent,
+                    backgroundColor: Colors.deepPurpleAccent.withOpacity(0.2),
+                    minHeight: 6,
+                  ),
+                ],
+              ),
+              children: [
+                if (dayPlan.description != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.orange.withOpacity(0.3),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.lightbulb_outline,
+                            color: Colors.orange,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              dayPlan.description!,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.orange,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ...dayPlan.goalGroups
+                    .map(
+                      (group) =>
+                          _buildGoalGroupCardForTaskList(group, setLocalState),
+                    )
+                    .toList(),
+                const SizedBox(height: 12),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // UPDATED: Goal group card for task list dropdown with FULL CRUD
+  Widget _buildGoalGroupCardForTaskList(
+    GoalGroup group,
+    StateSetter setLocalState,
+  ) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12, left: 20, right: 20),
+      color: Colors.grey[900],
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header with delete button
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        group.category,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      if (group.categoryDescription != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            group.categoryDescription!,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey[400],
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  onPressed: () {
+                    setLocalState(() {
+                      final dayKey = DateFormat('EEEE').format(selectedDate);
+                      final weekStart = _getWeekStart(selectedDate);
+                      final weekKey = DateFormat(
+                        'yyyy-MM-dd',
+                      ).format(weekStart);
+                      final dayPlan = weeklyPlans[weekKey]?.dayPlans[dayKey];
+
+                      if (dayPlan != null) {
+                        // Remove all tasks related to this group
+                        for (var goal in group.goals) {
+                          todayTasks.removeWhere(
+                            (t) =>
+                                t.title == goal.title &&
+                                t.category == group.category,
+                          );
+                        }
+                        // Remove the group itself
+                        dayPlan.goalGroups.remove(group);
+                      }
+                    });
+                    _saveData();
+                    setState(() {}); // Refresh main page
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // Goals with checkboxes and delete buttons
+            ...group.goals.asMap().entries.map((entry) {
+              int goalIndex = entry.key;
+              Goal goal = entry.value;
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Checkbox(
+                      value: goal.isCompleted,
+                      activeColor: Colors.green,
+                      onChanged: (value) {
+                        setLocalState(() {
+                          group.goals[goalIndex].isCompleted = value ?? false;
+
+                          // Sync to matching task in todayTasks
+                          final matchingTask = todayTasks.firstWhereOrNull(
+                            (t) =>
+                                t.title == goal.title &&
+                                t.category == group.category,
+                          );
+                          if (matchingTask != null) {
+                            matchingTask.isCompleted = value ?? false;
+                          }
+                        });
+                        _saveData();
+                        setState(() {}); // Refresh main page
+                      },
+                    ),
+                    Expanded(
+                      child: Text(
+                        goal.title,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: goal.isCompleted ? Colors.grey : Colors.white,
+                          decoration: goal.isCompleted
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 16),
+                      onPressed: () {
+                        setLocalState(() {
+                          group.goals.removeAt(goalIndex);
+
+                          // Also remove from todayTasks
+                          todayTasks.removeWhere(
+                            (t) =>
+                                t.title == goal.title &&
+                                t.category == group.category,
+                          );
+                        });
+                        _saveData();
+                        setState(() {}); // Refresh main page
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: () {
+                final dayKey = DateFormat('EEEE').format(selectedDate);
+                _addGoalToGroupTaskList(dayKey, group, setLocalState);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.add,
+                      size: 16,
+                      color: Colors.deepPurpleAccent,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Add Goal',
+                      style: TextStyle(
+                        color: Colors.deepPurpleAccent,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // NEW: Add goal dialog from task list dropdown
+  void _addGoalToGroupTaskList(
+    String dayKey,
+    GoalGroup group,
+    StateSetter setLocalState,
+  ) {
+    final goalController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Add Goal'),
+        content: TextField(
+          controller: goalController,
+          decoration: const InputDecoration(
+            labelText: 'Goal',
+            hintText: 'What do you want to achieve?',
+            border: OutlineInputBorder(),
+          ),
+          maxLines: 2,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (goalController.text.isNotEmpty) {
+                setLocalState(() {
+                  group.goals = [...group.goals];
+                  final newGoal = Goal(
+                    title: goalController.text,
+                    isCompleted: false,
+                  );
+                  group.goals.add(newGoal);
+
+                  // Also add to todayTasks
+                  todayTasks.add(
+                    Task(
+                      id: '${group.category}_${goalController.text}'.hashCode
+                          .toString(),
+                      title: goalController.text,
+                      category: group.category,
+                      isCompleted: false,
+                    ),
+                  );
+                });
+                _saveData();
+                setState(() {}); // Refresh main page instantly
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // UPDATED: _buildTaskCard method with proper syncing
+  Widget _buildTaskCard(Task task) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+          color: task.isCompleted
+              ? Colors.green.withOpacity(0.5)
+              : Colors.transparent,
+        ),
+      ),
+      child: ListTile(
+        leading: Checkbox(
+          value: task.isCompleted,
+          activeColor: Colors.green,
+          onChanged: (value) {
+            setState(() {
+              task.isCompleted = value ?? false;
+
+              // Sync to weekly goals
+              final dayKey = DateFormat('EEEE').format(selectedDate);
+              final weekStart = _getWeekStart(selectedDate);
+              final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+              final weekPlan = weeklyPlans[weekKey];
+              final dayPlan = weekPlan?.dayPlans[dayKey];
+
+              if (dayPlan != null) {
+                for (var group in dayPlan.goalGroups) {
+                  for (var goal in group.goals) {
+                    if (goal.title == task.title &&
+                        group.category == task.category) {
+                      goal.isCompleted = value ?? false;
+                    }
+                  }
+                }
+              }
+            });
+            _saveData();
+          },
+        ),
+        title: Text(
+          task.title,
+          style: TextStyle(
+            decoration: task.isCompleted ? TextDecoration.lineThrough : null,
+            color: task.isCompleted ? Colors.grey[500] : Colors.white,
+          ),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              task.category,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.deepPurpleAccent,
+              ),
+            ),
+            if (task.scheduledTime != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.access_time,
+                      size: 14,
+                      color: Colors.orange,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      DateFormat('HH:mm').format(task.scheduledTime!),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (task.pomodoroCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '🍅 ${task.pomodoroCount} pomodoro${task.pomodoroCount > 1 ? 's' : ''}',
+                  style: const TextStyle(fontSize: 12, color: Colors.red),
+                ),
+              ),
+          ],
+        ),
+        trailing: PopupMenuButton(
+          itemBuilder: (context) => [
+            const PopupMenuItem(
+              value: 'pomodoro',
+              child: Row(
+                children: [
+                  Icon(Icons.timer),
+                  SizedBox(width: 8),
+                  Text('Start Pomodoro'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'schedule',
+              child: Row(
+                children: [
+                  Icon(Icons.schedule),
+                  SizedBox(width: 8),
+                  Text('Set Time'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'notes',
+              child: Row(
+                children: [
+                  Icon(Icons.note),
+                  SizedBox(width: 8),
+                  Text('Add Notes'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'delete',
+              child: Row(
+                children: [
+                  Icon(Icons.delete, color: Colors.red),
+                  SizedBox(width: 8),
+                  Text('Delete'),
+                ],
+              ),
+            ),
+          ],
+          onSelected: (value) {
+            if (value == 'pomodoro') {
+              if (!isPomodoroRunning) {
+                _startPomodoro(task);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Stop current pomodoro first'),
+                    backgroundColor: Colors.orange,
+                  ),
+                );
+              }
+            } else if (value == 'schedule') {
+              _scheduleTask(task);
+            } else if (value == 'notes') {
+              _editTaskNotes(task);
+            } else if (value == 'delete') {
+              setState(() {
+                todayTasks.remove(task);
+              });
+              _saveData();
+            }
+          },
+        ),
       ),
     );
   }
