@@ -1959,6 +1959,12 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
           timer.cancel();
           isPomodoroRunning = false;
           task.pomodoroCount++;
+
+          // Properly reset timer state
+          pomodoroTimer = null;
+          currentPomodoroTask = null;
+          pomodoroMinutesLeft = 25; // Reset to default
+
           _showPomodoroComplete();
           _saveData();
         }
@@ -1971,8 +1977,14 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     setState(() {
       isPomodoroRunning = false;
       currentPomodoroTask = null;
-      pomodoroMinutesLeft = 25;
+      pomodoroMinutesLeft = 25; // Reset to initial 25 minutes
     });
+
+    // Ensure timer is fully disposed
+    pomodoroTimer = null;
+
+    // Save state to prevent inconsistencies
+    _saveData();
   }
 
   Future<void> _showPomodoroComplete() async {
