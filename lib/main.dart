@@ -2392,7 +2392,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                                         35,
                                       ),
                                     ),
-                                    child: const Text('Stop'),
+                                    child: const Text('Stop Pomodoro'),
                                   ),
                                 ],
                               ),
@@ -2408,7 +2408,9 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                             icon: Icon(
                               isFocusMode ? Icons.lock : Icons.lock_open,
                             ),
-                            label: Text(isFocusMode ? 'Focus ON' : 'Focus OFF'),
+                            label: Text(
+                              isFocusMode ? 'Turn OFF Focus' : 'Turn ON Focus',
+                            ),
                             style: ElevatedButton.styleFrom(
                               minimumSize: const Size(double.infinity, 45),
                               backgroundColor: isFocusMode
@@ -3486,7 +3488,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                       onPressed: () =>
                           _addGoalGroupDialog(dayKey, dayPlan, setDialogState),
                       icon: const Icon(Icons.add),
-                      label: const Text('Add Focus Area'),
+                      label: const Text('Add Focus Point'),
                       style: OutlinedButton.styleFrom(
                         minimumSize: const Size(double.infinity, 40),
                       ),
@@ -3644,7 +3646,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      'Add Goal',
+                      'Add Day Goal',
                       style: TextStyle(
                         color: Colors.deepPurpleAccent,
                         fontSize: 12,
@@ -4307,7 +4309,7 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                 children: [
                   Icon(Icons.timer),
                   SizedBox(width: 8),
-                  Text('Start Pomodoro'),
+                  Text('Start Pomodoro Session'),
                 ],
               ),
             ),
