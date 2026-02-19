@@ -4378,16 +4378,32 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
                   ),
                 );
               }
-            } else if (value == 'schedule') {
-              _scheduleTask(task);
-            } else if (value == 'notes') {
-              _editTaskNotes(task);
             } else if (value == 'delete') {
-              setState(() {
-                todayTasks.remove(task);
-              });
-              _saveData();
-            }
+  setState(() {
+    // Remove from today's tasks
+    todayTasks.remove(task);
+
+    // Sync removal to weekly goals
+    final dayKey = DateFormat('EEEE').format(selectedDate);
+    final weekStart = _getWeekStart(selectedDate);
+    final weekKey = DateFormat('yyyy-MM-dd').format(weekStart);
+    final weekPlan = weeklyPlans[weekKey];
+    final dayPlan = weekPlan?.dayPlans[dayKey];
+
+    if (dayPlan != null) {
+      for (var group in dayPlan.goalGroups) {
+        group.goals.removeWhere(
+          (g) =>
+              g.title == task.title &&
+              group.category == task.category,
+        );
+      }
+    }
+  });
+
+  _saveData();
+}
+
           },
         ),
       ),
