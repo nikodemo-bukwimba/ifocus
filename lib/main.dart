@@ -3841,10 +3841,18 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     // For each goal group and goal, ensure a task exists
     for (var group in dayPlan.goalGroups) {
       for (var goal in group.goals) {
-        // Check if task already exists (by title + category combo)
         final taskExists = todayTasks.any(
-          (t) => t.title == goal.title && t.category == group.category,
+          (t) =>
+             t.title.trim().toLowerCase() == goal.title.trim().toLowerCase() &&
+             t.category.trim().toLowerCase() == group.category.trim().toLowerCase(),
         );
+
+        final task = todayTasks.firstWhere(
+          (t) =>
+             t.title.trim().toLowerCase() == goal.title.trim().toLowerCase() &&
+             t.category.trim().toLowerCase() == group.category.trim().toLowerCase(),
+        );
+
 
         if (!taskExists) {
           // Create new task from goal
