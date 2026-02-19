@@ -3041,17 +3041,19 @@ class _TrackerHomePageState extends State<TrackerHomePage> {
     );
   }
 
-  int _calculateStreak() {
-    if (dailyLogs.isEmpty) return 0;
+  for (int i = dailyLogs.length - 1; i >= 0; i--) {
+   final logDate = DateTime.parse(dailyLogs[i]['date']);
+   final expectedDate = DateTime.now().subtract(Duration(days: streak));
 
-    int streak = 0;
-    for (int i = dailyLogs.length - 1; i >= 0; i--) {
-      if (dailyLogs[i]['score'] >= 50) {
-        streak++;
-      } else {
-        break;
-      }
-    }
+   if (DateFormat('yyyy-MM-dd').format(logDate) ==
+          DateFormat('yyyy-MM-dd').format(expectedDate) &&
+      dailyLogs[i]['score'] >= 50) {
+    streak++;
+   } else {
+    break;
+   }
+  }
+
     return streak;
   }
 
